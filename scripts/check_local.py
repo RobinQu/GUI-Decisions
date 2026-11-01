@@ -38,10 +38,12 @@ def main():
     ap.add_argument("--adapter")
     ap.add_argument("--config")
     ap.add_argument("--processor")
+    ap.add_argument("--device", help="device_map passed to transformers, e.g. cpu")
     ap.add_argument("--name", default="local")
     ap.add_argument("--against", help="published eval JSON:arm name, compared case by case")
     a = ap.parse_args()
-    model = Local(a.name, LocalSlotModel.from_pretrained(a.model, adapter=a.adapter, processor=a.processor, config=a.config))
+    model = Local(a.name, LocalSlotModel.from_pretrained(a.model, adapter=a.adapter, processor=a.processor,
+                                                         config=a.config, device_map=a.device))
     cs = E.cases(a.which, a.n)
     print(f"{a.which}: {len(cs)} cases", flush=True)
     rows, t = [], time.time()

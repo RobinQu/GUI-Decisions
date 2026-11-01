@@ -4,5 +4,8 @@ __pycache__/
 runs/
 results/
 data/
+!slotread/data/
+!slotread/data/*.py
 *.log
 .pytest_cache/
+.tools/
