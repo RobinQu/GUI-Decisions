@@ -102,9 +102,43 @@ def breakdown():
     plt.close(fig)
 
 
+def refinement():
+    recursive = load("results/recursive-zoom-final-s0.json")["heldout"]
+    multiview = load("results/multiview-final-v2-s0.json")["heldout"]
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.1))
+    labels = ["768px\n基线", "直接\n512px", "768→512px\n顺序缩放", "双768px\n视图"]
+    values = [100 * multiview["parent"]["accuracy"], 100 * recursive["direct"]["accuracy"],
+              100 * recursive["sequential"]["accuracy"], 100 * multiview["selected"]["accuracy"]]
+    colors = [GREEN, ORANGE, BLUE, "#8358a6"]
+    rects = axes[0].bar(np.arange(4), values, color=colors, width=0.65)
+    axes[0].bar_label(rects, fmt="%.2f", padding=3, fontsize=9)
+    axes[0].set_xticks(np.arange(4), labels)
+    axes[0].set_ylim(0, 62)
+    axes[0].set_ylabel("留出集命中率（%）")
+    axes[0].set_title("裁剪与多视图策略（n=791）")
+    axes[0].grid(axis="y", alpha=0.2)
+    groups = [("小目标", "area<0.001", "by_area"), ("文本", "text", "by_ui_type"),
+              ("图标", "icon", "by_ui_type")]
+    x = np.arange(len(groups)); width = 0.34
+    for offset, key, label, color in [(-width / 2, "parent", "768px 基线", GREEN),
+                                      (width / 2, "selected", "双视图", "#8358a6")]:
+        group_values = [100 * multiview[kind][key_name][key]["accuracy"] for _, key_name, kind in groups]
+        rects = axes[1].bar(x + offset, group_values, width, label=label, color=color)
+        axes[1].bar_label(rects, fmt="%.1f", padding=2, fontsize=8)
+    axes[1].set_xticks(x, [g[0] for g in groups])
+    axes[1].set_ylim(0, 82)
+    axes[1].set_title("双视图分层结果")
+    axes[1].grid(axis="y", alpha=0.2)
+    axes[1].legend()
+    fig.tight_layout()
+    fig.savefig(OUT / "refinement_comparison.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     overview()
     crop_sweep()
     breakdown()
+    refinement()
     shutil.copyfile("results/sspro_zoom_examples.jpg", OUT / "sspro_zoom_examples.jpg")
     print(f"Wrote figures to {OUT}")

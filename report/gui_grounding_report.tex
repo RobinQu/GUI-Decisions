@@ -30,7 +30,7 @@
 \maketitle
 
 \begin{abstract}
-本报告系统整理 GUI-Decisions 槽位读数方法的复现、自然图像外推及高分辨率 GUI grounding 改进实验。所有新增测量均基于 GUI-Decisions-2B 和本地 CPU 推理，不使用远程推理服务。原始 ScreenSpot 全量点命中率为 76.49\%，与文章报告值一致；RefCOCO 随机目标零样本点命中率达到 91.41\%，但小目标降至 75.78\%。在更困难的 ScreenSpot-Pro 上，全图槽位读数仅为 13.41\%。一次 512px 固定裁剪重读将其提升至 40.73\%；通过严格的校准集/留出集协议，进一步确定的 768px 裁剪与 KDE-grid 局部读出组合达到 47.88\%，留出集为 48.42\%。结果说明：槽位读数有效消除了坐标文本解码，但高分辨率场景的主要误差同时来自二维分布读出与视觉分辨率损失；简单的粗细粒度视觉搜索比复杂门控更稳定。图标目标仍只有 20.00\%，是当前最主要的短板。
+本报告系统整理 GUI-Decisions 槽位读数方法的复现、自然图像外推及高分辨率 GUI grounding 改进实验。所有新增测量均基于 GUI-Decisions-2B 和本地 CPU 推理，不使用远程推理服务。原始 ScreenSpot 全量点命中率为 76.49\%，与文章报告值一致；RefCOCO 随机目标零样本点命中率达到 91.41\%，但小目标降至 75.78\%。在更困难的 ScreenSpot-Pro 上，全图槽位读数仅为 13.41\%，768px 裁剪与 KDE-grid 达到 47.88\%。本轮进一步在独立的 791 条留出样本上验证：全图到 768px 再到 512px 的顺序缩放达到 50.95\%，双 768px 视图经无标签置信度选择达到 52.34\%，相对单视图基线提高 3.92 个百分点（McNemar $p=9.26\times10^{-6}$）。错误分解表明，视觉覆盖不足和目标可见后的局部误判同时存在；独立轴外积 KDE 与多视图只能缓解二维联合分布缺失，图标的功能语义和可执行区域建模仍是主要瓶颈。
 \end{abstract}
 
 \section{研究目标与结论摘要}
@@ -40,9 +40,10 @@
 \begin{itemize}
   \item \textbf{复现成立。} ScreenSpot 全量 default 读数为 76.49\%（973/1272），接近文章的 77.0\%及模型卡本地值 76.3\%。
   \item \textbf{零样本迁移成立，但不是普遍解决。} RefCOCO 点定位显著优于 vanilla，小目标明显下降；该协议不同于文章附录的框 IoU，不能直接比较。
-  \item \textbf{高分辨率下，二次裁剪是最强改进。} ScreenSpot-Pro 全量从 13.41\%提升至 40.73\%（512px default），再到 47.88\%（768px KDE-grid）。
+  \item \textbf{真实局部视觉是最强改进来源。} ScreenSpot-Pro 全量从 13.41\%提升至 40.73\%（512px default），再到 47.88\%（768px KDE-grid）。
   \item \textbf{KDE 有独立价值，但不能替代局部视觉重读。} 全图 KDE-grid 无额外模型前向提升 4.55 个百分点；局部 KDE-grid 与 768px 裁剪结合后收益更大。
-  \item \textbf{不确定样本门控并非普遍有效。} ScreenSpot-Pro 上 1576/1581 个样本仍被判定需要裁剪，几乎不节省计算；全分布方差驱动的自适应窗口也不如固定窗口。
+  \item \textbf{双视图取得本轮最高留出精度。} 双 768px 视图达到 52.34\%，高于顺序缩放的 50.95\%，但两者的直接配对差异不显著（$p=0.338$），不能据此断言双视图必然优于顺序缩放。
+  \item \textbf{复杂门控并非普遍有效。} ScreenSpot-Pro 上 1576/1581 个样本仍被判定需要裁剪，几乎不节省计算；全分布方差驱动的自适应窗口也不如固定窗口。
 \end{itemize}
 
 \begin{figure}[H]
@@ -235,18 +236,74 @@ KDE-grid & 17.96\% & +4.55\pp & 0 \\
 
 留出集小目标（面积 $<0.001$）从 9.91\%提升至 38.41\%（512px default），再到 44.51\%（768px KDE-grid）；文本从 20.99\%提升至 56.38\%和 66.26\%；图标仅从 2.62\%提升至 19.02\%和 20.00\%。因此后续算法应把图标语义与相似候选区分作为独立问题，而不能只继续放大图像。
 
+\section{错误分解：目标覆盖与局部判别}
+768px KDE-grid 留出集共有 408 个失败。将 GT 框映射到裁剪窗口后，可以把失败分为目标完全不可见、部分可见但中心在窗口外，以及中心可见后仍然误判。该分解只使用几何信息，不把模型置信度当作错误原因。
+\begin{table}[H]
+\centering\small
+\caption{768px KDE-grid 留出集失败分解（总失败数 408）}
+\begin{tabular}{lccc}
+\toprule
+错误类型 & 样本数 & 占失败比例 & 该覆盖率下的总体命中率 \\
+\midrule
+目标与窗口无交集 & 164 & 40.20\% & 0/164 \\
+部分可见、中心在窗口外 & 8 & 1.96\% & 3/11 \\
+目标中心可见但仍失败 & 236 & 57.84\% & 380/616 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+图标的 305 个样本中，108 个完全未覆盖、3 个部分覆盖且中心在外、133 个在中心可见后失败；文本对应为 56、5 和 103 个。对每类各 12 个中心可见失败进行视觉抽查，还观察到同一控件边缘的框外点，以及选到相邻或功能相近控件的情况。该抽查用于解释错误形态，不作为总体比例估计。校准集四种局部读出的 Pass@4 为 51.90\%，高于 KDE-grid 的 47.34\%；这些读出是确定性候选而非独立采样，Pass@4 只表示候选上限，不能当作可部署 top-1。
+
+\section{顺序缩放与双局部视图}
+\subsection{实验设计与校准结果}
+顺序缩放比较两条路径：直接路径以全图 default 为中心读取小窗口；顺序路径先执行既有 768px KDE-grid，再以该点为中心读取同尺寸小窗口。校准集扫描 256、384、512px 及 default/KDE-grid，最终选择 512px KDE-grid。其校准命中率为 48.99\%，直接 512px 为 44.81\%，配对提升 4.18 个百分点（95\% CI $[1.65,6.71]$，$p=0.00166$）；相对 768px 基线仅提高 1.65 个百分点，因此仍需留出验证。
+
+双视图保留上述 default 居中的 768px 窗口，并在全图外积 KDE 上寻找第二个空间模式。设默认点为 $g$，平滑后的二维密度为 $D$，候选网格点为 $c$，则第二中心满足
+\begin{equation}
+  a=\arg\max_{c:\lVert c-g\rVert_2\ge 0.1}D(c).
+\end{equation}
+局部 $5\times5$ 加权质心若落回阈值内，则回退到合格的峰值格点。全量 1581 个最终中心均通过距离检查。第二视图同样使用 768px；若边界裁剪后与第一窗口相同则复用，不重复前向。校准集在两个局部读出和三个置信度分数中选择，最终为 KDE-grid 与 \code{score=top1+spatial}，分数较高者作为 top-1。校准命中率为 50.13\%，相对基线提高 2.78 个百分点（95\% CI $[1.14,4.56]$，$p=0.00164$），Pass@2 为 53.92\%。
+
+\subsection{独立留出结果}
+所有方法共享同一 791 条留出样本；尺寸、读出和选择规则均在查看留出预测前确定。
+\begin{table}[H]
+\centering\small
+\caption{顺序缩放与双视图的留出集比较}
+\begin{tabular}{lccccc}
+\toprule
+方法 & Hit@1 & 相对 768px & McNemar $p$ & CPU 中位时间 & 新增局部读取 \\
+\midrule
+768px KDE-grid & 48.42\% & --- & --- & 2.40s & 0 \\
+直接 512px KDE-grid & 45.51\% & -2.91\pp & 0.0329 & 2.32s & 1/样本 \\
+768$\to$512px KDE-grid & 50.95\% & +2.53\pp & 0.0519 & 3.31s & 1/样本 \\
+\textbf{双 768px 视图} & \textbf{52.34\%} & \textbf{+3.92\pp} & $\mathbf{9.26\times10^{-6}}$ & 3.31s & 732/791 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+直接缩小窗口显著损害精度，说明覆盖损失可以超过局部分辨率收益。顺序缩放相对直接 512px 提高 5.44 个百分点（95\% CI $[2.78,8.09]$，$p=1.01\times10^{-4}$），证明逐级定位优于直接缩小；但其相对 768px 基线只修复 58 条、回退 38 条，$p=0.0519$，净收益处于显著性边界。三个确定性候选的 Pass@3 为 58.03\%，同样不是实际 top-1。
+
+双视图修复 40 条、回退 9 条，提升的 95\% CI 为 $[2.28,5.69]$ 个百分点。第二视图单独仅为 41.72\%，说明收益来自两视图互补及选择，而非备选模式普遍更好。Pass@2 为 55.25\%，与最终 52.34\%仍有 2.91 个百分点的选择差距。目标中心联合覆盖率从 77.88\%升至 82.05\%，新增覆盖 33 个样本；其余收益来自重叠区域的二次判别。双视图比顺序缩放高 1.39 个百分点，但直接配对区间为 $[-1.26,3.92]$，$p=0.338$，两者优劣尚不能确定。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{figures/refinement_comparison.png}
+  \caption{统一留出集上的裁剪、多视图及分层结果。所有柱均为实际 top-1，不包含 Pass@K 候选上限。}
+  \label{fig:refinement}
+\end{figure}
+
+双视图将小目标从 44.51\%提升至 48.48\%（$p=4.23\times10^{-5}$），文本从 66.26\%提升至 69.96\%（$p=0.00143$），图标从 20.00\%提升至 24.26\%（$p=0.00443$）。顺序缩放对应结果为 47.26\%、68.11\%和 23.61\%。图标仍远低于文本，是最明显的剩余瓶颈。表中 CPU 时间是本地运行的量级观测，不是控制并发的延迟基准；跨策略比较应同时参考实际模型读取次数。
+
 \section{讨论}
 \subsection{证据链与算法含义}
-实验形成了较清晰的递进关系：
+围绕最初提出的三个结构性问题，本轮实验形成以下结论，并区分直接证据与尚待验证的解释：
 \begin{enumerate}
-  \item \textbf{读出接口有效：} 槽位可以在不生成坐标文本的情况下保持 ScreenSpot 精度，并零样本迁移到自然图像点定位。
-  \item \textbf{独立轴分布不是完整空间表示：} expected 和 region voting 表现较差，KDE 的小幅收益说明多模态确实存在，但独立轴外积无法完整表达二维区域。
-  \item \textbf{高分辨率视觉证据是主要瓶颈：} 一次固定裁剪带来的收益远大于任何全图读出后处理。
-  \item \textbf{局部视觉与局部分布读出可组合：} 768px 提供合适的上下文与有效分辨率，KDE-grid 进一步修正局部候选选择。
-  \item \textbf{复杂搜索并不必然更好：} 全分布方差窗口、KDE 居中和不确定门控均未稳定超过简单固定裁剪。
+  \item \textbf{独立 x/y 槽位缺少真正的二维联合分布：部分验证、只能缓解。} expected 在全图上只有 6.58\%，KDE-grid 无需新前向达到 17.96\%，说明逐轴读出确实损失空间结构。外积 KDE 的备选模式经第二视图验证具有互补价值，但第二视图单独只有 41.72\%，且最终仍依赖置信度选择。这支持联合建模方向，却不能证明外积已经是真实联合分布，更不能替代联合监督训练。
+  \item \textbf{点监督不等于可执行区域和功能语义：仍是未解决的核心问题。} 408 个失败中 236 个发生在目标中心可见之后；视觉抽查又发现同控件边缘与相邻控件误判。双视图将图标提至 24.26\%，仍远低于文本的 69.96\%。这些现象与区域监督、功能语义及困难负例不足一致，但本轮未操纵训练目标，不能精确分解语义、局部视觉与标注噪声的贡献。
+  \item \textbf{全图单视图链路丢失局部视觉证据：得到最强验证。} 真实像素裁剪从全图 13.41\%跃升至 47.88\%，顺序缩放与双视图在留出集继续达到 50.95\%和 52.34\%，远大于纯坐标后处理收益。这验证的是输入尺度、上下文和单视图覆盖的综合瓶颈，尚不能单独归因于视觉降采样、token 合并或语言侧单步读出中的某一个环节。
 \end{enumerate}
 
-这些结果与 GUI-Actor、GUI-AIMA 的二维区域监督方向\cite{guiactor,guiaima}、UI-Zoomer 的不确定性搜索\cite{uizoomer}以及 Seg2Click 的子 token 区域预测\cite{seg2click}相互呼应。本文没有复现这些模型的训练结果，相关文献仅用于解释后续研究方向。
+因此，推理时搜索主要缓解第一和第三个问题，并未解决第二个问题。直接 512px 的回退说明分辨率、上下文和覆盖必须共同优化；Pass@K 与实际 top-1 的差距又说明候选生成和候选选择应分别评估。这些结果与 GUI-Actor、GUI-AIMA 的二维区域监督方向\cite{guiactor,guiaima}、UI-Zoomer 的不确定性搜索\cite{uizoomer}以及 Seg2Click 的子 token 区域预测\cite{seg2click}相互呼应。本文没有复现这些模型的训练结果，相关文献仅用于解释后续研究方向。
 
 \subsection{局限性}
 \begin{itemize}
@@ -254,14 +311,15 @@ KDE-grid & 17.96\% & +4.55\pp & 0 \\
   \item vanilla 使用 agent/tool-call 提示词，不是专用 grounding 提示词；不能据此声称所有公平提示条件下槽位都优于 vanilla。
   \item 原始 ScreenSpot 与 ScreenSpot-v2 的标注不同，本文不将 76.49\%与近期 v2 分数直接比较。
   \item RefCOCO 使用新的点定位协议，不能与文章附录的 box IoU 直接比较；小目标集合也不代表极小物体。
-  \item 128 条 pilot 仅用于探索；核心全量结论以 ScreenSpot-Pro 1581 条及独立留出验证为准。
-  \item 延迟全部来自 CPU，未验证 vLLM/SGLang、GPU 并发、prefix cache 或文章所述 NVFP4 服务性能。
+  \item 128 条 pilot 仅用于探索；核心结论以 ScreenSpot-Pro 全量结果及一次固定的 790/791 校准留出划分为主，尚无多随机划分或外部数据集复核。分层显著性为次要分析。
+  \item 视觉错误抽查每类只有 12 条，用于定性解释，不用于估计背景、相邻控件或标注边缘错误的总体比例。
+  \item 延迟全部来自 CPU，未验证 vLLM/SGLang、GPU 并发、prefix cache 或文章所述 NVFP4 服务性能；本轮新增策略也未做控制并发的专项延迟测试。
   \item Hit@1 不等于在线 agent 任务成功率；尚未执行 OSWorld/WebArena 端到端验证。
   \item $p_xp_y$ 是联合分布近似。要彻底解决二维歧义，需要联合 heatmap、区域 head 或子 token mask，而非继续调 KDE 参数。
 \end{itemize}
 
 \subsection{后续实验建议}
-短期应以 768px KDE-grid 作为新基线，增加图标/文本、目标面积和应用类别的困难分层，并验证二次局部放大与视图一致性训练。中期应比较三种同数据、同 backbone 输出头：独立 x/y bins、二维 patch heatmap、子 token mask。训练目标可引入背景抑制、尺寸自适应 Gaussian 或 BCE+Dice。长期需在统一 GPU 服务上测量端到端延迟，并在 OSWorld/WebArena 验证在线收益。
+短期保留 768px KDE-grid 作为统一基线，以双视图 52.34\%作为新的推理时参照，在同 backbone、同训练数据下比较独立 x/y bins、$16\times16$ joint-region 加局部 offset、二维 patch heatmap 和子 token mask。联合目标必须优化二维 NLL/KL 或区域 BCE+Dice，不能退化为四个独立数字槽。图标侧应加入同屏 target--distractor 困难负例与功能语义数据，并检查文本是否回退。中期可学习轻量 crop reranker 以缩小 Pass@K 与 top-1 差距；长期需在统一 GPU 服务上测量端到端延迟，并在 OSWorld/WebArena 验证在线收益。
 
 \section{可复现性与实验产物}
 原始结果保存在 \path{results/}，核心文件包括：
@@ -273,9 +331,13 @@ KDE-grid & 17.96\% & +4.55\pp & 0 \\
   \item \path{crop-sweep-calibration-s0_790.json}：尺寸与局部读出校准扫描。
   \item \path{crop-heldout-768-kdegrid-s0_791.json}：预选组合留出验证。
   \item \path{crop-sweep-final-s0.json}：校准、留出和合并统计分析。
+  \item \path{crop-errors-768-s0.json}：目标覆盖与局部误判分解。
+  \item \path{recursive-zoom-final-s0.json}：顺序缩放与直接小窗口的校准和留出比较。
+  \item \path{multiview-final-v2-s0.json}：双视图候选、置信度选择、覆盖和分层结果。
+  \item \path{multiview-vs-recursive-heldout-s0.json}：两种新策略的直接配对比较。
 \end{itemize}
 
-主要实现为 \path{slotread/zoom.py}、\path{scripts/check_zoom_local.py}、\path{scripts/check_crop_sweep_local.py}、\path{scripts/analyze_zoom.py} 和 \path{scripts/analyze_crop_sweep.py}。报告图表由 \path{scripts/generate_report_figures.py} 从原始 JSON 重新生成。实验已通过结果完整性检查、坐标/分布冒烟测试、\code{compileall}、\code{git diff --check} 和 \code{uv build}。
+主要实现为 \path{slotread/zoom.py}、\path{scripts/check_zoom_local.py}、\path{scripts/check_crop_sweep_local.py}、\path{scripts/analyze_zoom.py} 和 \path{scripts/analyze_crop_sweep.py}。本轮新增 \path{scripts/check_recursive_zoom_local.py}、\path{scripts/check_multiview_local.py} 及对应分析脚本；\path{scripts/analyze_crop_errors.py} 和 \path{scripts/make_error_audit.py} 分别生成几何分解和视觉抽查。报告图表由 \path{scripts/generate_report_figures.py} 从原始 JSON 重新生成。实验已通过结果完整性、有序划分、最终候选距离、坐标/分布冒烟和设备一致性检查，以及独立代码审查、\code{compileall}、\code{git diff --check} 和 \code{uv build}。早期双视图质心未严格满足距离阈值的部分结果已弃用，本报告仅使用修正后的 \code{v2} 完整运行。
 
 \begin{thebibliography}{9}\small
 \bibitem{guidecisions}
