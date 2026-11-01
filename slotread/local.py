@@ -44,11 +44,22 @@ class LocalSlotModel:
         return cls(model, AutoProcessor.from_pretrained(processor or model_id), cfg)
 
     @torch.no_grad()
-    def read(self, task, image, user):
-        """{slot: log-probabilities over its labels} for the task's whole layout, one forward pass;
-        also the forward's milliseconds."""
+    def read(self, task, image, user, condition=None, slots=None, return_hidden=False):
+        """Read selected slot distributions in one forward pass, optionally replacing earlier placeholders
+        with their actual label tokens; `condition` maps slot names to token ids and `slots` selects outputs.
+        If `return_hidden` is true, also return the final hidden states at the selected positions."""
         t = self.tasks[task]
         c = self.cfg["tasks"][task]
+        condition = condition or {}
+        selected = set(c["slots"] if slots is None else slots)
+        if not selected or not selected.issubset(c["slots"]) or not set(condition).issubset(c["slots"]):
+            raise ValueError("Requested slots and conditions must be nonempty subsets of the task layout")
+        first_output = min(c["slots"].index(s) for s in selected)
+        if any(c["slots"].index(s) >= first_output for s in condition):
+            raise ValueError("Condition slots must precede every requested output slot")
+        for slot, token_id in condition.items():
+            if int(token_id) not in c["labels"][slot]:
+                raise ValueError(f"Invalid label token for {slot}: {token_id}")
         image = cap_image(image.convert("RGB"), self.cfg.get("image_cap") or 0)  # as trained (GUI-Owl: 1 MP)
         ex = {"agent": dict(image=image, user=user), "box": dict(image=image, instruction=user),
               "seg": dict(image=image, sentence=user)}[task]
@@ -58,17 +69,34 @@ class LocalSlotModel:
         enc = self.proc.apply_chat_template(msgs, tokenize=True, return_dict=True, return_tensors="pt",
                                            add_generation_prompt=False, continue_final_message=True, enable_thinking=False)
         ids = enc["input_ids"][0]
-        keep = (ids == self.cfg["placeholder"]).nonzero().flatten()[-len(c["slots"]):] - 1
+        positions = (ids == self.cfg["placeholder"]).nonzero().flatten()[-len(c["slots"]):]
+        for slot, token_id in condition.items():
+            ids[positions[c["slots"].index(slot)]] = int(token_id)
+        keep_slots = [s for s in c["slots"] if s in selected]
+        keep = torch.stack([positions[c["slots"].index(s)] - 1 for s in keep_slots])
         dev = next(self.model.parameters()).device
         if dev.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()
-        out = self.model(**{k: v.to(dev) for k, v in enc.items()}, logits_to_keep=keep.to(dev), use_cache=False)
+        captured = []
+        if return_hidden:
+            norms = [module for name, module in self.model.named_modules() if name.endswith("language_model.norm")]
+            if len(norms) != 1:
+                raise ValueError("Could not identify the final language-model normalization layer")
+            handle = norms[0].register_forward_hook(lambda module, args, output: captured.append(output))
+        try:
+            out = self.model(**{k: v.to(dev) for k, v in enc.items()}, logits_to_keep=keep.to(dev), use_cache=False)
+        finally:
+            if return_hidden:
+                handle.remove()
         lv = torch.log_softmax(out.logits[0].float(), -1)
         if dev.type == "cuda":
             torch.cuda.synchronize()
         ms = (time.perf_counter() - t0) * 1000
-        return {s: lv[i, c["labels"][s]].cpu() for i, s in enumerate(c["slots"])}, ms
+        distributions = {s: lv[i, c["labels"][s]].cpu() for i, s in enumerate(keep_slots)}
+        if return_hidden:
+            return distributions, ms, captured[0][0, keep].cpu()
+        return distributions, ms
 
     def decide(self, image, instruction, previous="None"):
         """A computer-use step from one forward pass: action and point, plus the swipe end, key and scroll

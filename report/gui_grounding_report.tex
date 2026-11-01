@@ -30,11 +30,11 @@
 \maketitle
 
 \begin{abstract}
-本报告系统整理 GUI-Decisions 槽位读数方法的复现、自然图像外推及高分辨率 GUI grounding 改进实验。所有新增测量均基于 GUI-Decisions-2B 和本地 CPU 推理，不使用远程推理服务。原始 ScreenSpot 全量点命中率为 76.49\%，与文章报告值一致；RefCOCO 随机目标零样本点命中率达到 91.41\%，但小目标降至 75.78\%。在更困难的 ScreenSpot-Pro 上，全图槽位读数仅为 13.41\%，768px 裁剪与 KDE-grid 达到 47.88\%。本轮进一步在独立的 791 条留出样本上验证：全图到 768px 再到 512px 的顺序缩放达到 50.95\%，双 768px 视图经无标签置信度选择达到 52.34\%，相对单视图基线提高 3.92 个百分点（McNemar $p=9.26\times10^{-6}$）。错误分解表明，视觉覆盖不足和目标可见后的局部误判同时存在；独立轴外积 KDE 与多视图只能缓解二维联合分布缺失，图标的功能语义和可执行区域建模仍是主要瓶颈。
+本报告系统整理 GUI-Decisions 槽位读数方法的复现、自然图像外推及高分辨率 GUI grounding 改进实验。所有新增测量均基于 GUI-Decisions-2B 和本地 CPU 推理，不使用远程推理服务。原始 ScreenSpot 全量点命中率为 76.49\%，与文章报告值一致；RefCOCO 随机目标零样本点命中率达到 91.41\%，但小目标降至 75.78\%。在更困难的 ScreenSpot-Pro 上，全图槽位读数仅为 13.41\%，768px 裁剪与 KDE-grid 达到 47.88\%。本轮进一步在独立的 791 条留出样本上验证：全图到 768px 再到 512px 的顺序缩放达到 50.95\%，双 768px 视图经无标签置信度选择达到 52.34\%，相对单视图基线提高 3.92 个百分点（McNemar $p=9.26\times10^{-6}$）。针对独立轴缺少二维联合分布的问题，条件链式读取、完整/低秩联合头及线性头均未超过独立轴基线，说明该问题不能靠简单重排现有槽位或小样本冻结头解决，需要更大规模的直接二维空间训练和候选验证机制。
 \end{abstract}
 
 \section{研究目标与结论摘要}
-本文回答四个问题：（1）文章的槽位读数结果能否在本地复现；（2）该接口能否零样本外推到自然图像指代表达定位；（3）在高分辨率、密集专业 GUI 上，误差主要来自坐标读出还是视觉输入；（4）能否在不重新训练的情况下提高准确率，并量化额外计算成本。
+本文回答五个问题：（1）文章的槽位读数结果能否在本地复现；（2）该接口能否零样本外推到自然图像指代表达定位；（3）在高分辨率、密集专业 GUI 上，误差主要来自坐标读出还是视觉输入；（4）能否在不重新训练的情况下提高准确率，并量化额外计算成本；（5）独立 x/y 槽位的二维联合分布缺失能否通过条件读取或轻量联合监督解决。
 
 主要结论如下。
 \begin{itemize}
@@ -44,6 +44,7 @@
   \item \textbf{KDE 有独立价值，但不能替代局部视觉重读。} 全图 KDE-grid 无额外模型前向提升 4.55 个百分点；局部 KDE-grid 与 768px 裁剪结合后收益更大。
   \item \textbf{双视图取得本轮最高留出精度。} 双 768px 视图达到 52.34\%，高于顺序缩放的 50.95\%，但两者的直接配对差异不显著（$p=0.338$），不能据此断言双视图必然优于顺序缩放。
   \item \textbf{复杂门控并非普遍有效。} ScreenSpot-Pro 上 1576/1581 个样本仍被判定需要裁剪，几乎不节省计算；全分布方差驱动的自适应窗口也不如固定窗口。
+  \item \textbf{问题 1 尚未获得可部署解法。} 条件联合 KDE 在 128 条 pilot 上为 14.06\%，低于独立轴 KDE 的 15.62\%；$x+y$ 冻结特征联合头留出为 5.69\%，低于独立轴头的 6.70\%和原 default 的 13.91\%。
 \end{itemize}
 
 \begin{figure}[H]
@@ -294,12 +295,63 @@ KDE-grid & 17.96\% & +4.55\pp & 0 \\
 
 双视图将小目标从 44.51\%提升至 48.48\%（$p=4.23\times10^{-5}$），文本从 66.26\%提升至 69.96\%（$p=0.00143$），图标从 20.00\%提升至 24.26\%（$p=0.00443$）。顺序缩放对应结果为 47.26\%、68.11\%和 23.61\%。图标仍远低于文本，是最明显的剩余瓶颈。表中 CPU 时间是本地运行的量级观测，不是控制并发的延迟基准；跨策略比较应同时参考实际模型读取次数。
 
+\section{问题 1 专项：二维联合分布解法验证}
+\subsection{条件链式读取：形式正确，但实证无效}
+训练模板中，$y$ 的预测位置之前存在真实 $x$ token，而原单次推理把 $x$ 保留为占位符。由此可以回填候选 $x$，读取条件分布并构造截断联合：
+\begin{equation}
+  J_K(x,y)=Z^{-1}\mathbf{1}(x\in\mathcal C_K)\,p(x)p(y\mid x),\qquad Z=\sum_{x\in\mathcal C_K,y}p(x)p(y\mid x).
+\end{equation}
+候选按 $p(x)$ 降序并做 4-bin 非极大值抑制，同一运行评估 $K=1,2,4,8$；联合读出包括 MAP、区域期望和 KDE。默认读取接口经逐概率检查与旧实现一致，条件路径也产生了实际分布变化，并非实现上的恒等输出。
+
+128 条 pilot 上，独立 default/KDE 分别为 11.72\%/15.62\%，最佳条件联合 $K=4$ KDE 为 14.06\%，没有改善；$K=8$ 同为 14.06\%，但候选 Pass@8 达 23.44\%。简单置信度排序、$x$ 温度校准和独立/条件混合分布均未超过独立 KDE。扩大候选也没有趋势：相同 32 条上 $K=16$ 的联合 KDE 为 18.75\%，仍低于独立 KDE 的 21.88\%，尽管 Pass@16 为 31.25\%。768px 局部 pilot 中条件联合最佳为 40.62\%，与原局部 KDE 相同。
+
+更重要的是，$K=8$ 仅选中 14.84\%样本的 GT $x$ bin；在这些样本中，条件联合相对独立外积的 GT 对数似然平均下降 0.116，只有 31.58\%样本改善。说明瓶颈不仅是候选覆盖或选择，也包括现有条件信号本身。由于 pilot 已明确否定收益，未再消耗全量留出算力。该结果不能证明链式分解错误，而是说明\textbf{在当前模型、候选预算和分布质量下，它不是有效解法}。
+
+\subsection{冻结特征上的直接二维区域监督}
+第二条路径是在 final normalization 后提取槽位隐藏向量，训练轻量区域头。校准集前 632 条训练、后 158 条验证并选择 epoch，再用全部 790 条按该 epoch 重拟合，最终在 791 条留出样本评估。特征标准化只由相应训练数据估计。比较三种输出：
+\begin{itemize}
+  \item 独立轴头：分别预测 16 个 $x$ 区域和 16 个 $y$ 区域；
+  \item 完整联合头：直接预测 256 个二维区域；
+  \item 低秩联合头：$p(x,y)=\sum_r\pi_r u_r(x)v_r(y)$，$r=4$，以真正的联合 NLL 训练，而不是逐槽独立 CE。
+\end{itemize}
+三者都带 cell 内 sigmoid offset，使用相同 MLP、训练样本和验证协议；另以无线性隐藏层的版本检查模型容量影响。
+\begin{table}[H]
+\centering\small
+\caption{冻结特征区域头的留出结果（$n=791$，原 default 为 13.91\%）}
+\begin{tabular}{lccc}
+\toprule
+特征与输出头 & 独立轴 & 完整联合 & 低秩联合 \\
+\midrule
+仅 $y$-slot，MLP & 5.44\% & 3.29\% & 0.51\% \\
+$x+y$ slots，MLP & \textbf{6.70\%} & 5.69\% & 1.26\% \\
+仅 $y$-slot，线性 & 4.05\% & 2.78\% & 0.88\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+增加 $x$ 特征确实改善三种头，但独立轴始终最好，全部低于原 default。过拟合也很明显：仅 $y$ 特征的 MLP 重拟合后，独立头在全部校准样本上达到 51.27\%，完整联合头为 31.39\%，留出却分别只有 5.44\%和 3.29\%；去掉隐藏层并未改善。由此只能得出\textbf{少量校准数据上的冻结特征联合监督泛化失败}，不能推出二维联合监督在充分训练数据下无效。
+
+\subsection{官方二维 patch-attention 模型对照}
+为区分方法方向与本模型改造失败，进一步调用官方 GUI-Actor-2B-Qwen2-VL。该模型以专用 token 对视觉 patch 形成二维注意力区域，可在一次前向产生多个候选，并提供 verifier 路线\cite{guiactor}。本地使用官方 Transformers 4.51.3 和未修改的官方推理代码。
+
+在相同的 32 条样本上，1MP 输入的 top-1 仅为 9.38\%（3/32），Pass@3 为 12.50\%，低于槽位 default 的 15.62\%和 KDE 的 21.88\%；CPU 中位耗时约 46.85s/条。原始高分辨率下，两条运行超过 7 分钟仍未完成，因此没有获得可用的官方协议样本结果。本文不使用论文中的 36.7\%/41.8\%代替本地复现，也不以 1MP 小样本否定 GUI-Actor。该对照只说明其精度具有明显分辨率依赖，且本地 CPU 全分辨率验证成本过高。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{figures/joint_remediation.png}
+  \caption{问题 1 专项结果。左：条件联合 pilot；中：相同冻结特征和留出协议的区域头；右：官方 GUI-Actor 的 1MP 小样本对照。Pass@K 均为候选上限，不是实际 top-1。}
+  \label{fig:joint-remediation}
+\end{figure}
+
+\subsection{专项结论}
+本轮没有找到可部署的联合读出改进。条件链式读取、完整/低秩联合头和线性头均未超过独立轴基线，当前仍应保留独立轴 KDE 与双视图作为实际参照。可检验的后续解法不是在现有槽位上继续调参，而是以更大规模、覆盖更多应用和分辨率的数据直接训练二维 patch heatmap/区域 head，并配套训练候选 verifier。条件联合失败说明接口形式上的联合概率并不等于有用的空间表示；冻结头失败说明监督数据量和泛化同样关键。
+
 \section{讨论}
 \subsection{证据链与算法含义}
 围绕最初提出的三个结构性问题，本轮实验形成以下结论，并区分直接证据与尚待验证的解释：
 \begin{enumerate}
-  \item \textbf{独立 x/y 槽位缺少真正的二维联合分布：部分验证、只能缓解。} expected 在全图上只有 6.58\%，KDE-grid 无需新前向达到 17.96\%，说明逐轴读出确实损失空间结构。外积 KDE 的备选模式经第二视图验证具有互补价值，但第二视图单独只有 41.72\%，且最终仍依赖置信度选择。这支持联合建模方向，却不能证明外积已经是真实联合分布，更不能替代联合监督训练。
-  \item \textbf{点监督不等于可执行区域和功能语义：仍是未解决的核心问题。} 408 个失败中 236 个发生在目标中心可见之后；视觉抽查又发现同控件边缘与相邻控件误判。双视图将图标提至 24.26\%，仍远低于文本的 69.96\%。这些现象与区域监督、功能语义及困难负例不足一致，但本轮未操纵训练目标，不能精确分解语义、局部视觉与标注噪声的贡献。
+  \item \textbf{独立 x/y 槽位缺少真正的二维联合分布：问题成立，但未找到部署解法。} expected 在全图上只有 6.58\%，KDE-grid 无需新前向达到 17.96\%，说明逐轴读出确实损失空间结构。外积 KDE 的备选模式经第二视图验证具有互补价值，但第二视图单独只有 41.72\%。专项实验又否定了条件链式读取和小样本冻结联合头，说明接口上的联合概率与有效的联合空间表示不是同一回事。
+  \item \textbf{点监督不等于可执行区域和功能语义：仍是未解决的核心问题。} 408 个失败中 236 个发生在目标中心可见之后；视觉抽查又发现同控件边缘与相邻控件误判。双视图将图标提至 24.26\%，仍远低于文本的 69.96\%。这些现象与区域监督、功能语义及困难负例不足一致，但本轮未在完整模型上系统操纵训练目标，不能精确分解语义、局部视觉与标注噪声的贡献。
   \item \textbf{全图单视图链路丢失局部视觉证据：得到最强验证。} 真实像素裁剪从全图 13.41\%跃升至 47.88\%，顺序缩放与双视图在留出集继续达到 50.95\%和 52.34\%，远大于纯坐标后处理收益。这验证的是输入尺度、上下文和单视图覆盖的综合瓶颈，尚不能单独归因于视觉降采样、token 合并或语言侧单步读出中的某一个环节。
 \end{enumerate}
 
@@ -307,7 +359,8 @@ KDE-grid & 17.96\% & +4.55\pp & 0 \\
 
 \subsection{局限性}
 \begin{itemize}
-  \item 仅实测 2B 模型；31B、其他 backbone、训练型二维 head 和强化学习未验证。
+  \item 仅实测 2B 模型；31B、其他 backbone、完整模型的联合训练和强化学习未验证。轻量区域头只在 790 条校准数据上训练，存在明显过拟合，不能代表充分数据下的联合监督效果。
+  \item GUI-Actor 仅在相同 32 条样本上完成 1MP 对照，原始分辨率 CPU 运行未完成；论文分数不能替代本地复现，1MP 小样本也不能用于否定该模型。
   \item vanilla 使用 agent/tool-call 提示词，不是专用 grounding 提示词；不能据此声称所有公平提示条件下槽位都优于 vanilla。
   \item 原始 ScreenSpot 与 ScreenSpot-v2 的标注不同，本文不将 76.49\%与近期 v2 分数直接比较。
   \item RefCOCO 使用新的点定位协议，不能与文章附录的 box IoU 直接比较；小目标集合也不代表极小物体。
@@ -335,9 +388,14 @@ KDE-grid & 17.96\% & +4.55\pp & 0 \\
   \item \path{recursive-zoom-final-s0.json}：顺序缩放与直接小窗口的校准和留出比较。
   \item \path{multiview-final-v2-s0.json}：双视图候选、置信度选择、覆盖和分层结果。
   \item \path{multiview-vs-recursive-heldout-s0.json}：两种新策略的直接配对比较。
+  \item \path{conditional-joint-pilot-k8-sep4-s0_128.json}：条件联合原始预测与候选。
+  \item \path{conditional-joint-pilot-analysis-s0.json}：条件联合读出、候选上限和分布统计。
+  \item \path{joint-region-heads-y-refit-final-v2-s0.json}：单槽冻结特征区域头留出结果。
+  \item \path{joint-region-heads-xy-final-s0.json}：双槽冻结特征区域头留出结果。
+  \item \path{gui-actor-2b-1mp-pilot-s0_32.json}：官方 GUI-Actor 的 1MP 小样本对照。
 \end{itemize}
 
-主要实现为 \path{slotread/zoom.py}、\path{scripts/check_zoom_local.py}、\path{scripts/check_crop_sweep_local.py}、\path{scripts/analyze_zoom.py} 和 \path{scripts/analyze_crop_sweep.py}。本轮新增 \path{scripts/check_recursive_zoom_local.py}、\path{scripts/check_multiview_local.py} 及对应分析脚本；\path{scripts/analyze_crop_errors.py} 和 \path{scripts/make_error_audit.py} 分别生成几何分解和视觉抽查。报告图表由 \path{scripts/generate_report_figures.py} 从原始 JSON 重新生成。实验已通过结果完整性、有序划分、最终候选距离、坐标/分布冒烟和设备一致性检查，以及独立代码审查、\code{compileall}、\code{git diff --check} 和 \code{uv build}。早期双视图质心未严格满足距离阈值的部分结果已弃用，本报告仅使用修正后的 \code{v2} 完整运行。
+主要实现为 \path{slotread/zoom.py}、\path{scripts/check_zoom_local.py}、\path{scripts/check_crop_sweep_local.py}、\path{scripts/analyze_zoom.py} 和 \path{scripts/analyze_crop_sweep.py}。本轮新增 \path{scripts/check_recursive_zoom_local.py}、\path{scripts/check_multiview_local.py} 及对应分析脚本；\path{scripts/analyze_crop_errors.py} 和 \path{scripts/make_error_audit.py} 分别生成几何分解和视觉抽查。问题 1 专项使用 \path{slotread/joint.py}、\path{scripts/check_conditional_joint_local.py}、\path{scripts/extract_sspro_features.py}、\path{scripts/train_joint_region_head.py} 和 \path{scripts/check_gui_actor_local.py}；GUI-Actor 使用官方 4.51.3 环境和 ModelScope 权重。报告图表由 \path{scripts/generate_report_figures.py} 从原始 JSON 重新生成。实验已通过结果完整性、有序划分、最终候选距离、坐标/分布冒烟和设备一致性检查，以及独立代码审查、\code{compileall}、\code{git diff --check} 和 \code{uv build}。早期双视图质心未严格满足距离阈值的部分结果，以及低秩预测转置解码产生的指标均已弃用，本报告仅使用修正后的完整运行。
 
 \begin{thebibliography}{9}\small
 \bibitem{guidecisions}

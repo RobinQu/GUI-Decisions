@@ -135,10 +135,51 @@ def refinement():
     plt.close(fig)
 
 
+def joint_remediation():
+    conditional_rows = load("results/conditional-joint-pilot-k8-sep4-s0_128.json")["rows"]
+    conditional = load("results/conditional-joint-pilot-analysis-s0.json")
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.0))
+    bars(axes[0], ["独立\ndefault", "独立\nKDE", "条件联合\nK4 KDE", "条件候选\nPass@8"],
+         [100 * np.mean([r["global_default"]["hit"] for r in conditional_rows]),
+          100 * np.mean([r["global_kde_grid"]["hit"] for r in conditional_rows]),
+          100 * conditional["metrics"]["4"]["kde_grid"]["vs_default"]["accuracy"],
+          100 * conditional["metrics"]["8"]["kde_grid"]["distribution"]["pass_at_k"]["accuracy"]],
+         [GRAY, GREEN, BLUE, ORANGE], "条件联合读出（n=128）")
+    y_result = load("results/joint-region-heads-y-refit-final-v2-s0.json")["heads"]
+    xy_result = load("results/joint-region-heads-xy-final-s0.json")["heads"]
+    labels = ["独立轴", "完整联合", "低秩联合"]
+    x = np.arange(3); width = 0.32
+    for offset, result, label, color in [(-width / 2, y_result, "仅 y 特征", BLUE),
+                                         (width / 2, xy_result, "x+y 特征", "#8358a6")]:
+        values = [100 * result[name]["heldout"]["with_offset"]["accuracy"] for name in
+                  ("independent", "joint", "low_rank")]
+        rects = axes[1].bar(x + offset, values, width, label=label, color=color)
+        axes[1].bar_label(rects, fmt="%.1f", padding=2, fontsize=8)
+    axes[1].axhline(13.91, color=GRAY, linestyle="--", label="原 default")
+    axes[1].set_xticks(x, labels)
+    axes[1].set_ylim(0, 18)
+    axes[1].set_title("冻结特征区域头（留出 n=791）")
+    axes[1].set_ylabel("命中率（%）")
+    axes[1].grid(axis="y", alpha=0.2)
+    axes[1].legend(fontsize=8)
+    actor_rows = load("results/gui-actor-2b-1mp-pilot-s0_32.json")["rows"]
+    slot_rows = load("results/zoom-sspro-full-default-s0_screenspot-pro_zoom_1581.json")["rows"][:32]
+    bars(axes[2], ["槽位\ndefault", "槽位\nKDE", "GUI-Actor\ntop-1", "GUI-Actor\nPass@3"],
+         [100 * np.mean([r["global"]["default"]["hit"] for r in slot_rows]),
+          100 * np.mean([r["global"]["kde_grid"]["hit"] for r in slot_rows]),
+          100 * np.mean([r["top1_hit"] for r in actor_rows]),
+          100 * np.mean([r["top3_hit"] for r in actor_rows])],
+         [GRAY, GREEN, BLUE, ORANGE], "GUI-Actor 1MP（相同 32 条）")
+    fig.tight_layout()
+    fig.savefig(OUT / "joint_remediation.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     overview()
     crop_sweep()
     breakdown()
     refinement()
+    joint_remediation()
     shutil.copyfile("results/sspro_zoom_examples.jpg", OUT / "sspro_zoom_examples.jpg")
     print(f"Wrote figures to {OUT}")
