@@ -164,12 +164,14 @@ def joint_remediation():
     axes[1].legend(fontsize=8)
     actor_rows = load("results/gui-actor-2b-1mp-pilot-s0_32.json")["rows"]
     slot_rows = load("results/zoom-sspro-full-default-s0_screenspot-pro_zoom_1581.json")["rows"][:32]
-    bars(axes[2], ["槽位\ndefault", "槽位\nKDE", "GUI-Actor\ntop-1", "GUI-Actor\nPass@3"],
+    official_rows = load("results/gui-actor-2b-official-res-pilot-s0_8.json")["rows"]
+    bars(axes[2], ["槽位\ndefault", "槽位\nKDE", "1MP\ntop-1", "1MP\nPass@3", "官方分辨率\ntop-1（8条）"],
          [100 * np.mean([r["global"]["default"]["hit"] for r in slot_rows]),
           100 * np.mean([r["global"]["kde_grid"]["hit"] for r in slot_rows]),
           100 * np.mean([r["top1_hit"] for r in actor_rows]),
-          100 * np.mean([r["top3_hit"] for r in actor_rows])],
-         [GRAY, GREEN, BLUE, ORANGE], "GUI-Actor 1MP（相同 32 条）")
+          100 * np.mean([r["top3_hit"] for r in actor_rows]),
+          100 * np.mean([r["top1_hit"] for r in official_rows])],
+         [GRAY, GREEN, BLUE, ORANGE, "#8358a6"], "GUI-Actor 输入分辨率对照")
     fig.tight_layout()
     fig.savefig(OUT / "joint_remediation.png", bbox_inches="tight")
     plt.close(fig)

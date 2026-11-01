@@ -334,17 +334,17 @@ $x+y$ slots，MLP & \textbf{6.70\%} & 5.69\% & 1.26\% \\
 \subsection{官方二维 patch-attention 模型对照}
 为区分方法方向与本模型改造失败，进一步调用官方 GUI-Actor-2B-Qwen2-VL。该模型以专用 token 对视觉 patch 形成二维注意力区域，可在一次前向产生多个候选，并提供 verifier 路线\cite{guiactor}。本地使用官方 Transformers 4.51.3 和未修改的官方推理代码。
 
-在相同的 32 条样本上，1MP 输入的 top-1 仅为 9.38\%（3/32），Pass@3 为 12.50\%，低于槽位 default 的 15.62\%和 KDE 的 21.88\%；CPU 中位耗时约 46.85s/条。原始高分辨率下，两条运行超过 7 分钟仍未完成，因此没有获得可用的官方协议样本结果。本文不使用论文中的 36.7\%/41.8\%代替本地复现，也不以 1MP 小样本否定 GUI-Actor。该对照只说明其精度具有明显分辨率依赖，且本地 CPU 全分辨率验证成本过高。
+在相同的 32 条样本上，1MP 输入的 top-1 仅为 9.38\%（3/32），Pass@3 为 12.50\%，低于槽位 default 的 15.62\%和 KDE 的 21.88\%；CPU 中位耗时约 46.85s/条。随后完成官方约 $3200\times1800$ 等效像素的 8 条小样本：top-1 和 Pass@3 均为 50.00\%（4/8），相同 8 条的 1MP 仅为 12.50\%，槽位 default/KDE 均为 25.00\%；CPU 中位耗时约 570.64s/条。该结果支持高分辨率二维区域方法的方向，但样本量很小，不能当作全量 benchmark 分数，论文中的 36.7\%/41.8\%也不代替本地复现。
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\textwidth]{figures/joint_remediation.png}
-  \caption{问题 1 专项结果。左：条件联合 pilot；中：相同冻结特征和留出协议的区域头；右：官方 GUI-Actor 的 1MP 小样本对照。Pass@K 均为候选上限，不是实际 top-1。}
+  \caption{问题 1 专项结果。左：条件联合 pilot；中：相同冻结特征和留出协议的区域头；右：GUI-Actor 分辨率对照，1MP 使用 32 条，官方分辨率使用 8 条。Pass@K 均为候选上限，不是实际 top-1。}
   \label{fig:joint-remediation}
 \end{figure}
 
 \subsection{专项结论}
-本轮没有找到可部署的联合读出改进。条件链式读取、完整/低秩联合头和线性头均未超过独立轴基线，当前仍应保留独立轴 KDE 与双视图作为实际参照。可检验的后续解法不是在现有槽位上继续调参，而是以更大规模、覆盖更多应用和分辨率的数据直接训练二维 patch heatmap/区域 head，并配套训练候选 verifier。条件联合失败说明接口形式上的联合概率并不等于有用的空间表示；冻结头失败说明监督数据量和泛化同样关键。
+本轮没有找到适用于当前 GUI-Decisions-2B 的联合读出改进。条件链式读取、完整/低秩联合头和线性头均未超过独立轴基线，当前仍应保留独立轴 KDE 与双视图作为实际参照。GUI-Actor 的 8 条官方分辨率小样本则支持直接二维区域方法，但不能外推为全量结果。可检验的后续解法不是在现有槽位上继续调参，而是以更大规模、覆盖更多应用和分辨率的数据直接训练二维 patch heatmap/区域 head，并配套训练候选 verifier。条件联合失败说明接口形式上的联合概率并不等于有用的空间表示；冻结头失败说明监督数据量和泛化同样关键。
 
 \section{讨论}
 \subsection{证据链与算法含义}
@@ -360,7 +360,7 @@ $x+y$ slots，MLP & \textbf{6.70\%} & 5.69\% & 1.26\% \\
 \subsection{局限性}
 \begin{itemize}
   \item 仅实测 2B 模型；31B、其他 backbone、完整模型的联合训练和强化学习未验证。轻量区域头只在 790 条校准数据上训练，存在明显过拟合，不能代表充分数据下的联合监督效果。
-  \item GUI-Actor 仅在相同 32 条样本上完成 1MP 对照，原始分辨率 CPU 运行未完成；论文分数不能替代本地复现，1MP 小样本也不能用于否定该模型。
+  \item GUI-Actor 完成 32 条 1MP 和 8 条官方分辨率对照，后者 CPU 中位耗时约 570.64s/条；小样本不能外推为全量结果，论文分数也不能替代本地复现。
   \item vanilla 使用 agent/tool-call 提示词，不是专用 grounding 提示词；不能据此声称所有公平提示条件下槽位都优于 vanilla。
   \item 原始 ScreenSpot 与 ScreenSpot-v2 的标注不同，本文不将 76.49\%与近期 v2 分数直接比较。
   \item RefCOCO 使用新的点定位协议，不能与文章附录的 box IoU 直接比较；小目标集合也不代表极小物体。
@@ -393,6 +393,7 @@ $x+y$ slots，MLP & \textbf{6.70\%} & 5.69\% & 1.26\% \\
   \item \path{joint-region-heads-y-refit-final-v2-s0.json}：单槽冻结特征区域头留出结果。
   \item \path{joint-region-heads-xy-final-s0.json}：双槽冻结特征区域头留出结果。
   \item \path{gui-actor-2b-1mp-pilot-s0_32.json}：官方 GUI-Actor 的 1MP 小样本对照。
+  \item \path{gui-actor-2b-official-res-pilot-s0_8.json}：官方分辨率小样本及耗时。
 \end{itemize}
 
 主要实现为 \path{slotread/zoom.py}、\path{scripts/check_zoom_local.py}、\path{scripts/check_crop_sweep_local.py}、\path{scripts/analyze_zoom.py} 和 \path{scripts/analyze_crop_sweep.py}。本轮新增 \path{scripts/check_recursive_zoom_local.py}、\path{scripts/check_multiview_local.py} 及对应分析脚本；\path{scripts/analyze_crop_errors.py} 和 \path{scripts/make_error_audit.py} 分别生成几何分解和视觉抽查。问题 1 专项使用 \path{slotread/joint.py}、\path{scripts/check_conditional_joint_local.py}、\path{scripts/extract_sspro_features.py}、\path{scripts/train_joint_region_head.py} 和 \path{scripts/check_gui_actor_local.py}；GUI-Actor 使用官方 4.51.3 环境和 ModelScope 权重。报告图表由 \path{scripts/generate_report_figures.py} 从原始 JSON 重新生成。实验已通过结果完整性、有序划分、最终候选距离、坐标/分布冒烟和设备一致性检查，以及独立代码审查、\code{compileall}、\code{git diff --check} 和 \code{uv build}。早期双视图质心未严格满足距离阈值的部分结果，以及低秩预测转置解码产生的指标均已弃用，本报告仅使用修正后的完整运行。
